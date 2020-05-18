@@ -281,7 +281,7 @@ namespace Sample_HighThroughputBlobUpload
             await RunInternal();
             Reporter.RecordEnd();
         }
-        
+
         protected abstract Task RunInternal();
 
         protected TestReporter Reporter { get; }
@@ -490,7 +490,7 @@ namespace Sample_HighThroughputBlobUpload
             return new UploadBlockTestDataEntry(stopwatch.Elapsed, cbb.Container.Name, cbb.Name, blockID);
         }
 
-        private async Task<UploadBlockTestDataEntry> PutBlockListAsync(CloudBlockBlob cbb, List<string> blockIds) 
+        private async Task<UploadBlockTestDataEntry> PutBlockListAsync(CloudBlockBlob cbb, List<string> blockIds)
         {
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
@@ -542,16 +542,16 @@ namespace Sample_HighThroughputBlobUpload
 
             if (!isValid)
             {
-                Console.WriteLine("Invalid Arguments Provided to UploadTestBlocks.  Expected Arguments: [0]:blobPrefix [1]:nBlocksToUpload [2]:blockSizeInBytes [3]:reportFrequency [4]:percentile");
+                Console.WriteLine("Invalid Arguments Provided to UploadRandomSizeTestBlocks.  Expected Arguments: [0]:blobPrefix [1]:nBlocksToUpload [2]:blockSizeInBytes [3]:reportFrequency [4]:percentile");
             }
 
             return isValid;
         }
     }
 
-    class PutBlobTest : Test
+    class PutRandomSizeBlobTest : Test
     {
-        public PutBlobTest
+        public PutRandomSizeBlobTest
             (TestReporter testReporter,
              CloudStorageAccount storageAccount,
              CloudBlobContainer container,
@@ -577,9 +577,6 @@ namespace Sample_HighThroughputBlobUpload
         protected override async Task RunInternal()
         {
             await Container.CreateIfNotExistsAsync();
-
-            //byte[] buffer = new byte[BlobSizeBytes];
-            //new Random().NextBytes(buffer);
 
             SemaphoreSlim sem = new SemaphoreSlim(5, 5);
             List<Task> tasks = new List<Task>();
@@ -653,7 +650,112 @@ namespace Sample_HighThroughputBlobUpload
 
             if (!isValid)
             {
-                Console.WriteLine("Invalid Arguments Provided to UploadTestBlobs.  Expected Arguments: [0]:blobPrefix [1]:nBlobsToUpload [2]:blobSizeBytes [3]:reportFrequency [4]:percentile");
+                Console.WriteLine("Invalid Arguments Provided to UploadRandomSizeTestBlobs.  Expected Arguments: [0]:blobPrefix [1]:nBlobsToUpload [2]:blobSizeBytes [3]:reportFrequency [4]:percentile");
+            }
+
+            return isValid;
+        }
+    }
+
+    class PutFixedSizeBlobTest : Test
+    {
+        public PutFixedSizeBlobTest
+            (TestReporter testReporter,
+             CloudStorageAccount storageAccount,
+             CloudBlobContainer container,
+             string[] testArgs) :
+            base(testReporter, storageAccount, container)
+        {
+            if (!ParseArguments(testArgs, out string blobPrefix, out ulong currentBlobIndex, out ulong blobSizeBytes, out uint? reportFrequency, out double? percentile))
+            {
+                throw new ArgumentException("The provided parameters were incorrect.");
+            }
+
+            BlobPrefix = blobPrefix;
+            CurrentBlobIndex = currentBlobIndex;
+            BlobSizeBytes = blobSizeBytes;
+
+            if (reportFrequency != null && percentile != null)
+            {
+                TestProgressReporter progressReporter = new TestProgressReporter(reportFrequency.Value, percentile.Value, currentBlobIndex);
+                testReporter.EntryAddedEvent += progressReporter.ProcessTestEntry;
+            }
+        }
+
+        protected override async Task RunInternal()
+        {
+            await Container.CreateIfNotExistsAsync();
+
+            byte[] buffer = new byte[BlobSizeBytes];
+            new Random().NextBytes(buffer);
+
+            SemaphoreSlim sem = new SemaphoreSlim(5, 5);
+            List<Task> tasks = new List<Task>();
+
+            string blobName = BlobPrefix + CurrentBlobIndex;
+            CloudBlockBlob blob = Container.GetBlockBlobReference(blobName);
+            Reporter.AddEntry(await UploadBlobAsync(buffer, blob));
+        }
+
+        private string BlobPrefix { get; }
+        private ulong CurrentBlobIndex { get; }
+        private ulong BlobSizeBytes { get; }
+
+
+        private async Task<DownloadTestDataEntry> UploadBlobAsync(byte[] buffer, CloudBlockBlob cbb)
+        {
+            Stopwatch stopwatch = new Stopwatch();
+            stopwatch.Start();
+            await cbb.UploadFromByteArrayAsync(buffer, 0, buffer.Length);
+            stopwatch.Stop();
+
+            return new DownloadTestDataEntry(stopwatch.Elapsed, cbb.Container.Name, cbb.Name);
+        }
+        private bool ParseArguments(string[] args, out string blobPrefix, out ulong currentBlobIndex, out ulong blobSizeBytes, out uint? reportFrequency, out double? percentile)
+        {
+            bool isValid = true;
+            blobPrefix = "";
+            currentBlobIndex = 0;
+            blobSizeBytes = 0;
+            reportFrequency = null;
+            percentile = null;
+
+            const ulong BLOB_SIZE_LIMIT = 256 * 1024 * 1024;
+
+            try
+            {
+                if (args.Length > 2)
+                {
+                    blobPrefix = args[0];
+                    currentBlobIndex = Convert.ToUInt64(args[1]);
+                    blobSizeBytes = Convert.ToUInt64(args[2]);
+
+                    if (args.Length > 4)
+                    {
+                        reportFrequency = Convert.ToUInt32(args[3]);
+                        percentile = Convert.ToDouble(args[4]);
+                    }
+                }
+                else
+                {
+                    isValid = false;
+                }
+
+                // Validate fetched values.
+                if (blobSizeBytes > BLOB_SIZE_LIMIT)
+                {
+                    Console.WriteLine($"BlobSizeBytes cannot exceed the maximum allowed size for a PutBlob ({BLOB_SIZE_LIMIT}).");
+                    isValid = false;
+                }
+            }
+            catch (Exception)
+            {
+                isValid = false;
+            }
+
+            if (!isValid)
+            {
+                Console.WriteLine("Invalid Arguments Provided to UploadFixedSizeTestBlobs.  Expected Arguments: [0]:blobPrefix [1]:currentBlobIndex [2]:blobSizeBytes [3]:reportFrequency [4]:percentile");
             }
 
             return isValid;
@@ -723,9 +825,9 @@ namespace Sample_HighThroughputBlobUpload
         private ulong NBlobsToUpload { get; }
         private ulong BlobSizeBytes { get; }
 
-        private async Task UploadBlobAsync (CloudBlockBlob blob, byte[] buffer, ulong blobSizeBytes)
+        private async Task UploadBlobAsync(CloudBlockBlob blob, byte[] buffer, ulong blobSizeBytes)
         {
-            ulong blockSizeBytes = (ulong) buffer.Length;
+            ulong blockSizeBytes = (ulong)buffer.Length;
 
             List<Task> tasks = new List<Task>();
             List<string> blockList = new List<string>();
@@ -739,7 +841,7 @@ namespace Sample_HighThroughputBlobUpload
 
                 await semaphore.WaitAsync();
 
-                tasks.Add(blob.PutBlockAsync(blockIdStr, ms, null).ContinueWith((t)=>
+                tasks.Add(blob.PutBlockAsync(blockIdStr, ms, null).ContinueWith((t) =>
                 {
                     if (t.IsCompletedSuccessfully)
                     {
@@ -763,7 +865,7 @@ namespace Sample_HighThroughputBlobUpload
 
                 await semaphore.WaitAsync();
 
-                tasks.Add(blob.PutBlockAsync(blockIdStr, ms, null).ContinueWith((t)=>
+                tasks.Add(blob.PutBlockAsync(blockIdStr, ms, null).ContinueWith((t) =>
                 {
                     if (t.IsCompletedSuccessfully)
                     {
@@ -853,7 +955,7 @@ namespace Sample_HighThroughputBlobUpload
                 testReporter.EntryAddedEvent += progressReporter.ProcessTestEntry;
             }
 
-            
+
         }
 
         protected override async Task RunInternal()
@@ -877,7 +979,7 @@ namespace Sample_HighThroughputBlobUpload
                 Reporter.AddEntry(new ListBlobTestDataEntry(stopwatch.Elapsed, nResults));
                 stopwatch.Reset();
 
-            } while (continuationToken != null) ;
+            } while (continuationToken != null);
         }
 
         private string BlobPrefix { get; }
@@ -1104,13 +1206,13 @@ namespace Sample_HighThroughputBlobUpload
         private async Task<DownloadTestDataEntry> DownloadRandomBytesFromBlobAsync(string nextBlobName, Stream stream, CloudBlockBlob cbb, long blobSize)
         {
             //int random1 = 943718;
-            //int startOffset = new Random().Next(0, (int)blobSize);
-            //int length = new Random().Next(0, (int)blobSize - startOffset);
+            int startOffset = new Random().Next(0, (int)blobSize);
+            int length = new Random().Next(0, (int)blobSize - startOffset);
             //int random2 = 3202009;
             //int startOffset = random1 > random2 ? random2 : random1;
             //int endOffset = random1 > random2 ? random1 : random2;
-            int startOffset = 0;
-            int length = 1024;
+            //int startOffset = 0;
+            //int length = 1024;
             //int length = 1258291;
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
@@ -1136,7 +1238,7 @@ namespace Sample_HighThroughputBlobUpload
                 Console.WriteLine($"Container {Container} has more blobs than currently handled by the test.  Restricting download range bettwen {BlobPrefix}1 and {BlobPrefix}{Int32.MaxValue}.");
                 nBlobs = Int32.MaxValue;
             }
-            return $"{BlobPrefix}{new Random().Next(0, (int)nBlobs-1)}";
+            return $"{BlobPrefix}{new Random().Next(0, (int)nBlobs - 1)}";
         }
     }
 
@@ -1193,9 +1295,10 @@ namespace Sample_HighThroughputBlobUpload
             byte[] buffer2 = new byte[NBytesPerBlob];
 
             // Choose the name of the first blob to retrieve.
-            string nextBlobName = GetRandomBlobName();
+            //string nextBlobName = GetRandomBlobName();
+            string nextBlobName = "testblob-20";
 
-            for (uint i = 1; i <= NBlobsToDownload; ++i)
+            for (uint i = 0; i <= NBlobsToDownload; ++i)
             {
                 var cbb = Container.GetBlockBlobReference(nextBlobName);
 
@@ -1203,8 +1306,8 @@ namespace Sample_HighThroughputBlobUpload
                 //int startOffset = new Random().Next(0, (int)blobSize);
                 //int length = new Random().Next(0, (int)blobSize - startOffset);
                 //length = length == 0 ? 1 : length;
-                int startOffset = 0;
-                int length = 1258291;
+                int startOffset = 80048513;
+                int length = 81342;
                 MemoryStream readStream1 = new MemoryStream(buffer1);
                 MemoryStream readStream2 = new MemoryStream(buffer2);
                 Reporter.AddEntry(await DownloadRandomBytesFromBlobAsync(nextBlobName, readStream1, cbb, startOffset, length));
@@ -1398,7 +1501,7 @@ namespace Sample_HighThroughputBlobUpload
                 storageAccount = CloudStorageAccount.Parse(storageAccountName);
             }
             // If a SAS wasn't provided, throw.
-            else if(string.IsNullOrEmpty(storageAccountSas))
+            else if (string.IsNullOrEmpty(storageAccountSas))
             {
                 throw new Exception($"Unable to connect to storage account. The environment variable '{storageAccountSasEnvVar}' is not defined.");
             }
@@ -1446,8 +1549,11 @@ namespace Sample_HighThroughputBlobUpload
                 Test test = null;
                 switch (testType.ToUpper())
                 {
-                    case "PUTBLOBTEST":
-                        test = new PutBlobTest(reporter, storageAccount, container, testArgs);
+                    case "PUTRANDOMSIZEBLOBTEST":
+                        test = new PutRandomSizeBlobTest(reporter, storageAccount, container, testArgs);
+                        break;
+                    case "PUTFIXEDSIZEBLOBTEST":
+                        test = new PutFixedSizeBlobTest(reporter, storageAccount, container, testArgs);
                         break;
                     case "PUTBLOCKTEST":
                         test = new PutBlockTest(reporter, storageAccount, container, testArgs);
@@ -1532,7 +1638,7 @@ namespace Sample_HighThroughputBlobUpload
                     containerName = args[0];
                     storageAccountNameEnvVar = args[1];
                     storageAccountSasEnvVar = storageAccountNameEnvVar + "Sas";
-                    outputFilePath = args[2];
+                    outputFilePath = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString() + args[2];
                     environment = args[3];
                     useHttps = Convert.ToBoolean(args[4]);
                     testType = args[5];
@@ -1542,7 +1648,7 @@ namespace Sample_HighThroughputBlobUpload
                     {
                         // Ugly, but couldn't find the right helper function :(.
                         testSpecificArgs = new string[args.Length - 6];
-                        for(uint i = 6; i < args.Length; ++i)
+                        for (uint i = 6; i < args.Length; ++i)
                         {
                             testSpecificArgs[i - 6] = args[i];
                         }
