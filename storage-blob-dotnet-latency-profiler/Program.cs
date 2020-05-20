@@ -588,6 +588,7 @@ namespace Sample_HighThroughputBlobUpload
                 new Random().NextBytes(buffer);
                 string blobName = BlobPrefix + i;
                 CloudBlockBlob blob = Container.GetBlockBlobReference(blobName);
+                Console.WriteLine($"Uploading blob {blobName}.");
                 Reporter.AddEntry(await UploadBlobAsync(buffer, blob));
             }
         }
@@ -1477,6 +1478,291 @@ namespace Sample_HighThroughputBlobUpload
         }
     }
 
+    class DataValidationBlockSequenceTest : Test
+    {
+        public DataValidationBlockSequenceTest
+            (TestReporter testReporter,
+             CloudStorageAccount storageAccount,
+             CloudBlobContainer container,
+             string[] dataValidationTestArgs) :
+            base(testReporter, storageAccount, container)
+        {
+            if (!ParseArguments(dataValidationTestArgs, out string blobPrefix, out ulong nBlobsToDownload, out long maxBytesPerBlob, out ulong? nBlobsAvailable, out uint? reportFrequency, out double? percentile))
+            {
+                throw new ArgumentException("The provided parameters were incorrect.");
+            }
+            BlobPrefix = blobPrefix;
+            NBlobsToDownload = nBlobsToDownload;
+
+            if (reportFrequency != null && percentile != null)
+            {
+                TestProgressReporter progressReporter = new TestProgressReporter(reportFrequency.Value, percentile.Value, NBlobsToDownload);
+                testReporter.EntryAddedEvent += progressReporter.ProcessTestEntry;
+            }
+
+            if (nBlobsAvailable != null)
+            {
+                NBlobsAvailable = nBlobsAvailable.Value;
+            }
+            else
+            {
+                // Determine the number of blobs that exist in the container (not interested in tracking ListBlob perf here).
+                NBlobsAvailable = GetNumBlobsInContainer().Result;
+            }
+            if (NBlobsAvailable > 0)
+            {
+                //NBytesPerBlob = GetBytesPerBlob().Result;
+                //if (maxBytesPerBlob > NBytesPerBlob)
+                //{
+                //    throw new Exception($"Requested number of bytes to download per blob ({maxBytesPerBlob}) is greater than the size of blobs in container '{container.Name}' ({NBytesPerBlob}).");
+                //}
+                NBytesPerBlob = maxBytesPerBlob;
+            }
+            else
+            {
+                throw new Exception($"No blobs exist in the specified container '{container.Name}'.");
+            }
+        }
+
+        protected override async Task RunInternal()
+        {
+            // Initialize a buffer large enough to contain the contents of a single blob.
+            byte[] buffer1 = new byte[NBytesPerBlob];
+            byte[] buffer2 = new byte[NBytesPerBlob];
+            int blockSize = 4 * 1024 * 1024; // 4MB
+
+            int blobNameIndex = 0;
+
+            for (uint i = 0; i < NBlobsToDownload; ++i)
+            {
+                if (blobNameIndex < 0)
+                {
+                    break;
+                }
+
+                // Get the name of the next blob to retrieve.
+                string nextBlobName = GetNextBlobName(ref blobNameIndex);
+
+                var cbb = Container.GetBlockBlobReference(nextBlobName);
+
+                long blobSize = GetBytesOfBlob(cbb).Result;
+                int startOffset = new Random().Next(0, (int)blockSize);
+                int length = new Random().Next(0, (int)blockSize - startOffset);
+                length = length == 0 ? 1 : length;
+
+                int blockCounter = 0;
+                while (startOffset + length < blobSize)
+                {
+                    MemoryStream readStream1 = new MemoryStream(buffer1);
+                    MemoryStream readStream2 = new MemoryStream(buffer2);
+                    Reporter.AddEntry(await DownloadRandomBytesFromBlobAsync(nextBlobName, readStream1, cbb, startOffset, length));
+                    Reporter.AddEntry(await DownloadBlobAsync(readStream2, cbb));
+                    try
+                    {
+                        validateData(buffer1, buffer2, startOffset, length);
+                    }
+                    catch (Exception ex)
+                    {
+                        // We should never fail validation and its what we are going after - abort execution
+                        Console.Write(ex.ToString());
+                        Environment.Exit(10);
+                    }
+
+                    blockCounter++;
+                    startOffset = new Random().Next(0, (int)blockSize);
+                    length = new Random().Next(0, (int)blockSize - startOffset);
+                    length = length == 0 ? 1 : length;
+                    startOffset = startOffset + blockCounter * blockSize;
+                }
+            }
+        }
+
+        private void validateData(byte[] buffer1, byte[] buffer2, int startOffset, int length)
+        {
+            for (int i = 0; i < length; i++)
+            {
+                if (buffer1[i] != buffer2[i + startOffset])
+                {
+                    throw new Exception($"Byte to byte comparison failed! {buffer1.Length}, {buffer1.Length}");
+                }
+            }
+            Console.WriteLine($"Data validation succeeded! {startOffset}, {length}");
+        }
+
+        private string BlobPrefix { get; }
+        private ulong NBlobsToDownload { get; }
+        private ulong NBlobsAvailable { get; }
+        private long NBytesPerBlob { get; }
+
+        private bool ParseArguments(string[] args, out string blobPrefix, out ulong nBlobsToDownload, out long nBytesToDownloadPerBlob, out ulong? nBlobsAvailable, out uint? reportFrequency, out double? percentile)
+        {
+            bool isValid = true;
+            blobPrefix = "";
+            nBlobsToDownload = 0;
+            nBytesToDownloadPerBlob = 0;
+            nBlobsAvailable = null;
+            reportFrequency = null;
+            percentile = null;
+
+            try
+            {
+                if (args.Length > 2)
+                {
+                    blobPrefix = args[0];
+                    nBlobsToDownload = Convert.ToUInt64(args[1]);
+                    nBytesToDownloadPerBlob = Convert.ToInt64(args[2]);
+                    if (args.Length > 4)
+                    {
+                        nBlobsAvailable = Convert.ToUInt64(args[3]);
+                    }
+                    if (args.Length > 5)
+                    {
+                        reportFrequency = Convert.ToUInt32(args[4]);
+                        percentile = Convert.ToDouble(args[5]);
+                    }
+                }
+                else
+                {
+                    isValid = false;
+                }
+            }
+            catch (Exception)
+            {
+                isValid = false;
+            }
+
+            if (!isValid)
+            {
+                Console.WriteLine("Invalid Arguments Provided to RandomDownloadTest.  Expected Arguments: [0]:blobPrefix [1]:nBlobsToDownload [2]:maxBytesPerBlob [3]:nBlobsAvailable [4]:reportFrequency [5]:percentile");
+            }
+
+            return isValid;
+        }
+
+        private async Task<long> GetBytesOfBlob(CloudBlockBlob blob)
+        {
+            await blob.FetchAttributesAsync();
+            return blob.Properties.Length;
+        }
+
+        private async Task<long[]> GetBlockSizes(CloudBlockBlob blob)
+        {
+            List<long> blockSizes = new List<long>();
+            var listBlockItems = await blob.DownloadBlockListAsync(BlockListingFilter.All, null, null, null);
+            foreach (var listBlockItem in listBlockItems)
+            {
+                if (listBlockItem.Committed)
+                {
+                    blockSizes.Add(listBlockItem.Length);
+                }
+                else
+                {
+                    // We should always have commited blocks here!
+                    return null;
+                }
+            }
+
+            return blockSizes.ToArray();
+        }
+
+        private async Task<ulong> GetNumBlobsInContainer()
+        {
+            BlobContinuationToken continuationToken = null;
+            ulong nMatchingBlobs = 0;
+            while (true)
+            {
+                BlobResultSegment resultSegment = await Container.ListBlobsSegmentedAsync(BlobPrefix, continuationToken);
+                if (resultSegment.ContinuationToken == null)
+                {
+                    break;
+                }
+
+                // Yay lazy evaluation
+                foreach (IListBlobItem item in resultSegment.Results)
+                {
+                    ++nMatchingBlobs;
+                }
+                continuationToken = resultSegment.ContinuationToken;
+            }
+            return nMatchingBlobs;
+        }
+
+        /// <summary>
+        /// Downloads the "NBytesPerBlob" of the given blob into the given stream and returns the amount of time taken.
+        /// </summary>
+        /// <param name="ms">Memory stream to populate with he </param>
+        /// <param name="cbb"></param>
+        /// <returns></returns>
+        private async Task<DownloadTestDataEntry> DownloadBlobAsync(Stream stream, CloudBlockBlob cbb)
+        {
+
+            Stopwatch stopwatch = new Stopwatch();
+            stopwatch.Start();
+            await cbb.DownloadToStreamAsync(stream);
+            stopwatch.Stop();
+
+            return new DownloadTestDataEntry(stopwatch.Elapsed, cbb.Container.Name, cbb.Name);
+        }
+
+        /// <summary>
+        /// Downloads Random bytes of the given blob into the given stream and returns the amount of time taken.
+        /// </summary>
+        /// <param name="stream">Memory stream to populate with he </param>
+        /// <param name="cbb"></param>
+        /// <returns></returns>
+        private async Task<DownloadTestDataEntry> DownloadRandomBytesFromBlobAsync(string nextBlobName, Stream stream, CloudBlockBlob cbb,
+            int startOffset, int length)
+        {
+            //int random1 = 943718;
+            //int startOffset = new Random().Next(0, (int)blobSize);
+            //int length = new Random().Next(0, (int)blobSize - startOffset);
+            //int random2 = 3202009;
+            //int startOffset = random1 > random2 ? random2 : random1;
+            //int endOffset = random1 > random2 ? random1 : random2;
+            //int startOffset = 0;
+            //int length = 12291;
+            //int length = 1258291;
+            Stopwatch stopwatch = new Stopwatch();
+            stopwatch.Start();
+            Console.WriteLine($"Reading: ({nextBlobName}, {startOffset}, {length}).");
+            //await cbb.DownloadToStreamAsync(stream);
+            await cbb.DownloadRangeToStreamAsync(stream, startOffset, length);
+            stopwatch.Stop();
+
+            Console.WriteLine($"Reading blob succeeded: ({nextBlobName}, {startOffset}, {length}).");
+
+            return new DownloadTestDataEntry(stopwatch.Elapsed, cbb.Container.Name, cbb.Name);
+        }
+    
+        /// <summary>
+        /// Gets blob name based on provided nextBlobsIndex and increments nextBlobsIndex.
+        /// nextBlobsIndex is set to -1 once passed through all blobs.
+        /// </summary>
+        /// <param name="nextBlobsIndex">index of next blob, zero start, negative number last one was used</param>
+        /// <returns></returns>
+        private string GetNextBlobName(ref int nextBlobsIndex)
+        {
+            // we start with   and with -1
+            if (nextBlobsIndex < 0)
+            {
+                return null;
+            }
+
+            int nBlobs = (int)NBlobsAvailable;
+            int usedBlobsIndex = nextBlobsIndex;
+            if (usedBlobsIndex < nBlobs)
+            {
+                nextBlobsIndex = usedBlobsIndex + 1;
+            }
+            else
+            {
+                nextBlobsIndex = -1;
+            }
+
+            return $"{BlobPrefix}{usedBlobsIndex}";
+        }
+
+    }
 
     class Program
     {
@@ -1572,6 +1858,9 @@ namespace Sample_HighThroughputBlobUpload
                         break;
                     case "DATAVALIDATIONTEST":
                         test = new DataValidationTest(reporter, storageAccount, container, testArgs);
+                        break;
+                    case "DATAVALIDATIONSEQUENCETEST":
+                        test = new DataValidationBlockSequenceTest(reporter, storageAccount, container, testArgs);
                         break;
                     default:
                         throw new NotImplementedException($"A test named {testType} has not been implemented.");
